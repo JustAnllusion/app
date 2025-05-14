@@ -83,9 +83,10 @@ def main():
     else:
         colorize = False
 
-    if {"Сумма договора", "Дата регистрации"}.issubset(df.columns):
-        price_index = (
-            df.set_index("Дата регистрации")["Сумма договора"]
+    if {"Сумма договора", "Площадь договора", "Дата регистрации"}.issubset(df.columns):
+        df["Цена за м2"] = df["Сумма договора"] / df["Площадь договора"]
+        price_index_m2 = (
+            df.set_index("Дата регистрации")["Цена за м2"]
             .resample("M")
             .mean()
             .to_period("M")
@@ -94,28 +95,25 @@ def main():
             .add(1)
             .cumprod()
         )
-        first_factor = price_index / price_index.iloc[0]
-        last_factor  = price_index / price_index.iloc[-1]
-
-        def _to_base(row, factors):
-            dt = row["Дата регистрации"]
-            if pd.isna(dt):
-                return np.nan
-            period = dt.to_period("M")
-            return row["Сумма договора"] / factors.get(period, 1.0)
-
-        df["Сумма договора (к первой дате)"] = df.apply(_to_base, axis=1, factors=first_factor)
-        df["Сумма договора (к последней дате)"] = df.apply(_to_base, axis=1, factors=last_factor)
+        last_factor_m2 = price_index_m2 / price_index_m2.iloc[-1]
+        df["Цена за м2 нормированная"] = df.apply(
+            lambda row: row["Цена за м2"] /
+                last_factor_m2.get(row["Дата регистрации"].to_period("M"), 1.0)
+            if pd.notna(row["Дата регистрации"]) else np.nan,
+            axis=1
+        )
+        df["Сумма договора нормированная"] = (
+            df["Цена за м2 нормированная"] * df["Площадь договора"]
+        )
 
     targets = [
-        c
-        for c in (
+        c for c in (
             "Сумма договора",
-            "Сумма договора (к первой дате)",
-            "Сумма договора (к последней дате)",
+            "Сумма договора нормированная",
             "Площадь договора",
-        )
-        if c in df.columns
+            "Цена за м2",
+            "Цена за м2 нормированная",
+        ) if c in df.columns
     ]
 
     all_feats = [
@@ -255,9 +253,11 @@ def main():
             else:
                 x_val = data[feature].dropna()
             df_raw = data.assign(x=x_val).dropna(subset=["x", target])
-            is_date_feature = is_datetime64_any_dtype(data[feature])
-            if is_date_feature:
+            is_date_feature = True
+            if is_datetime64_any_dtype(data[feature]):
                 df_raw["year"] = df_raw["x"].dt.to_period("Y").dt.to_timestamp()
+            else:  
+                df_raw["year"] = df_raw["x"]
 
             st.subheader("Scatter")
             color_arg = "Кластер" if colorize and "Кластер" in data.columns else None
@@ -296,46 +296,37 @@ def main():
             st.plotly_chart(fig, use_container_width=True)
 
             if is_date_feature:
-                with col1:
-                    st.subheader("Среднее по неделям")
-                    df_raw["week"] = df_raw["x"].dt.to_period("W").dt.start_time
-                    if colorize and "Кластер" in data.columns:
-                        mean_week = df_raw.groupby(["week", "Кластер"], as_index=False)[target].mean()
-                        fig_week = px.scatter(mean_week, x="week", y=target, color="Кластер")
-                    else:
-                        mean_week = df_raw.groupby("week", as_index=False)[target].mean()
-                        fig_week = px.scatter(mean_week, x="week", y=target)
-                    fig_week.update_layout(xaxis_title="Неделя", yaxis_title=target)
-                    fig_week.update_yaxes(tickformat=".3~s")
-                    st.plotly_chart(fig_week, use_container_width=True)
+                st.subheader("Среднее по году")
+                if colorize and "Кластер" in data.columns:
+                    mean_year = df_raw.groupby(["year", "Кластер"], as_index=False)[target].mean()
+                    fig_year = px.line(mean_year, x="year", y=target, color="Кластер")
+                else:
+                    mean_year = df_raw.groupby("year", as_index=False)[target].mean()
+                    fig_year = px.line(mean_year, x="year", y=target)
+                fig_year.update_layout(xaxis_title="Год", yaxis_title=target)
+                st.plotly_chart(fig_year, use_container_width=True)
             else:
                 with col1:
                     st.subheader("Среднее по десятилетиям возраста")
                     age_dec = df_raw.assign(age_dec=(df_raw["x"] // 10) * 10)
-                    mean_dec = age_dec.groupby("age_dec", as_index=False)[target].mean()
-                    fig_dec = px.scatter(mean_dec, x="age_dec", y=target)
+                    if colorize and "Кластер" in data.columns:
+                        mean_dec = age_dec.groupby(["age_dec", "Кластер"], as_index=False)[target].mean()
+                        fig_dec = px.scatter(mean_dec, x="age_dec", y=target, color="Кластер")
+                    else:
+                        mean_dec = age_dec.groupby("age_dec", as_index=False)[target].mean()
+                        fig_dec = px.scatter(mean_dec, x="age_dec", y=target)
                     fig_dec.update_layout(xaxis_title="Возраст (округл. до 10 лет)", yaxis_title=target)
-                    fig_dec.update_yaxes(tickformat=".3~s")
                     st.plotly_chart(fig_dec, use_container_width=True)
 
-            with col2:
-                if is_date_feature:
-                    st.subheader("Среднее по году")
-                    if colorize and "Кластер" in data.columns:
-                        mean_year = df_raw.groupby(["year", "Кластер"], as_index=False)[target].mean()
-                        fig_year = px.line(mean_year, x="year", y=target, color="Кластер")
-                    else:
-                        mean_year = df_raw.groupby("year", as_index=False)[target].mean()
-                        fig_year = px.line(mean_year, x="year", y=target)
-                    fig_year.update_layout(xaxis_title="Год", yaxis_title=target)
-                    fig_year.update_yaxes(tickformat=".3~s")
-                    st.plotly_chart(fig_year, use_container_width=True)
-                else:
+                with col2:
                     st.subheader("Среднее по возрасту (один год)")
-                    mean_age = df_raw.groupby("x", as_index=False)[target].mean()
-                    fig_age = px.line(mean_age, x="x", y=target)
+                    if colorize and "Кластер" in data.columns:
+                        mean_age = df_raw.groupby(["x", "Кластер"], as_index=False)[target].mean()
+                        fig_age = px.scatter(mean_age, x="x", y=target, color="Кластер")
+                    else:
+                        mean_age = df_raw.groupby("x", as_index=False)[target].mean()
+                        fig_age = px.scatter(mean_age, x="x", y=target)
                     fig_age.update_layout(xaxis_title="Возраст", yaxis_title=target)
-                    fig_age.update_yaxes(tickformat=".3~s")
                     st.plotly_chart(fig_age, use_container_width=True)
 
             st.subheader(f"Распределение {feature}")
