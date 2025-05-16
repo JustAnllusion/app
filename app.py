@@ -46,17 +46,53 @@ def extract_gender(name):
     parts = str(name).split()
     return guess_gender_by_patronymic(parts[2]) if len(parts) == 3 else "Не определено"
 
+def discount_values(df):
+    if {"Сумма договора", "Площадь договора", "Дата регистрации"}.issubset(df.columns):
+        df["Цена за м2"] = df["Сумма договора"] / df["Площадь договора"]
+        price_index = (
+            df.set_index("Дата регистрации")["Цена за м2"]
+            .resample("M").mean().to_period("M").pct_change().fillna(0).add(1).cumprod()
+        )
+        factor = price_index / price_index.iloc[-1]
+        df["Цена за м2 нормированная"] = df.apply(
+            lambda r: r["Цена за м2"] / factor.get(r["Дата регистрации"].to_period("M"), 1.0)
+            if pd.notna(r["Дата регистрации"]) else np.nan,
+            axis=1,
+        )
+        df["Сумма договора нормированная"] = df["Цена за м2 нормированная"] * df["Площадь договора"]
+    return df
+
+def remove_outliers(series):
+    low, high = series.quantile([0.01, 0.99])
+    return series.between(low, high)
+
 def main():
     df = load_data("df_with_polygon.xlsx")
     df["Текущий регион"] = df["Текущий регион"].astype(str).str.title()
     if "Типология" in df.columns:
         df = df[df["Типология"] != "сп"]
 
+    df = discount_values(df)
+    df["Год регистрации"] = df["Дата регистрации"].dt.year.astype("Int64")
+
     section = st.sidebar.radio("Раздел", ["Обзор признаков", "Анализ данных"], key="sec")
     regions = sorted(df["Текущий регион"].dropna().unique())
     selected_regions = st.sidebar.multiselect("Регион", ["Все"] + regions, default=["Все"], key="region")
     if "Все" not in selected_regions:
         df = df[df["Текущий регион"].isin(selected_regions)]
+
+    if section == "Анализ данных":
+        years = sorted(df["Год регистрации"].dropna().astype(int).unique())
+        selected_years = st.sidebar.multiselect(
+            "Год регистрации",
+            ["Все"] + years,
+            default=["Все"],
+            key="year",
+            format_func=str
+        )
+        if "Все" not in selected_years:
+            df = df[df["Год регистрации"].isin(selected_years)]
+
     selected_clusters = []
 
     cluster_map = {
@@ -83,28 +119,7 @@ def main():
     else:
         colorize = False
 
-    if {"Сумма договора", "Площадь договора", "Дата регистрации"}.issubset(df.columns):
-        df["Цена за м2"] = df["Сумма договора"] / df["Площадь договора"]
-        price_index_m2 = (
-            df.set_index("Дата регистрации")["Цена за м2"]
-            .resample("M")
-            .mean()
-            .to_period("M")
-            .pct_change()
-            .fillna(0)
-            .add(1)
-            .cumprod()
-        )
-        last_factor_m2 = price_index_m2 / price_index_m2.iloc[-1]
-        df["Цена за м2 нормированная"] = df.apply(
-            lambda row: row["Цена за м2"] /
-                last_factor_m2.get(row["Дата регистрации"].to_period("M"), 1.0)
-            if pd.notna(row["Дата регистрации"]) else np.nan,
-            axis=1
-        )
-        df["Сумма договора нормированная"] = (
-            df["Цена за м2 нормированная"] * df["Площадь договора"]
-        )
+
 
     targets = [
         c for c in (
